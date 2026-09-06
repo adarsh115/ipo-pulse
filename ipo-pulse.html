@@ -1,0 +1,241 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IPO Pulse — live desk</title>
+<style>
+  :root { --ink:#16181E; --muted:#6A6F7A; --line:#D7D4CB; --paper:#E8E6DE; --card:#FFFffb;
+    --apply:#1B7A4A; --apply-bg:#E3F4EA; --watch:#8A5A12; --watch-bg:#F6EBD8;
+    --skip:#9A3B32; --skip-bg:#F8E6E3; --navy:#1F3A5F; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:22px 16px 64px; }
+  .hero { background:var(--ink); color:#F4F3EE; border-radius:16px; padding:22px 24px 18px; }
+  .hero h1 { font-family:Georgia,serif; margin:0 0 6px; font-size:28px; }
+  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:760px; }
+  .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center; }
+  .chip { background:#2A2D36; color:#EDEBE2; font-size:12px; padding:4px 10px; border-radius:999px; }
+  .refresh { border:0; background:#F4F3EE; color:var(--ink); font-weight:700; font-size:13px;
+    padding:7px 14px; border-radius:999px; cursor:pointer; }
+  .refresh:disabled { opacity:.6; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin:16px 0 8px; }
+  .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); font-weight:600; }
+  .field input { font:inherit; color:var(--ink); padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; width:110px; }
+  .err { background:#F8E6E3; color:var(--skip); border-radius:10px; padding:10px 14px; margin:10px 0; font-size:13px; }
+  .plan { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin:12px 0 18px; }
+  .plan h2 { margin:0 0 8px; font-size:15px; }
+  .slots { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .slotbox { background:#F6F5F0; border-radius:10px; padding:12px 14px; }
+  .slotbox h3 { margin:0 0 4px; font-size:11px; color:var(--muted); letter-spacing:.04em; text-transform:uppercase; }
+  .slotbox strong { display:block; font-size:16px; margin-bottom:4px; }
+  .slotbox p { margin:0; font-size:13px; line-height:1.45; }
+  .grid { display:grid; gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
+  .row1 { display:flex; justify-content:space-between; gap:10px; align-items:flex-start; }
+  .name { font-weight:750; font-size:16px; }
+  .subn { color:var(--muted); font-size:12.5px; margin-top:2px; }
+  .verdict { flex-shrink:0; font-size:11px; font-weight:800; letter-spacing:.04em; padding:5px 9px; border-radius:999px; text-transform:uppercase; }
+  .v-APPLY { background:var(--apply-bg); color:var(--apply); }
+  .v-WATCH { background:var(--watch-bg); color:var(--watch); }
+  .v-SKIP { background:var(--skip-bg); color:var(--skip); }
+  .stats { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:10px 0 6px; }
+  .stat { background:#F6F5F0; border-radius:9px; padding:8px 9px; }
+  .stat b { display:block; font-variant-numeric:tabular-nums; font-size:13.5px; }
+  .stat span { font-size:11px; color:var(--muted); }
+  .why { font-size:13.5px; line-height:1.45; margin:6px 0 0; }
+  .note { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
+  @media (max-width:800px){ .slots,.stats { grid-template-columns:1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <h1>IPO Pulse</h1>
+    <p>Live feed from InvestorGain, scored for your desk: 4 PANs, two mainboard lots per account. Refresh pulls GMP, dates, lot and size — then the engine picks Slot 1 and Slot 2.</p>
+    <div class="meta">
+      <span class="chip" id="stamp">Not loaded</span>
+      <span class="chip">source: investorgain live table</span>
+      <button class="refresh" id="btn" onclick="load()">Refresh live data</button>
+    </div>
+  </header>
+  <div class="controls">
+    <label class="field">PANs <input id="pans" type="number" min="1" value="4" /></label>
+    <label class="field">₹ / account <input id="budget" type="number" min="14000" step="500" value="28000" /></label>
+    <label class="field">Assume retail × <input id="subX" type="number" min="1" value="40" /></label>
+  </div>
+  <div id="err" hidden class="err"></div>
+  <div class="plan" id="plan">Loading live IPO table…</div>
+  <div class="grid" id="list"></div>
+  <p class="note">GMP is unofficial grey-market data from InvestorGain, not a listing guarantee. Closed rows are dropped. SME is skipped unless one lot fits the account budget. Open this file over http(s) or as a local file with internet on.</p>
+</div>
+<script>
+const FEED = "https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/9/2026/2026-27/0/all?search=&v=";
+function strip(html) {
+  if (html == null) return "";
+  const d = document.createElement("div");
+  d.innerHTML = String(html);
+  return (d.textContent || "").replace(/\s+/g, " ").trim();
+}
+function num(s) {
+  if (s == null || s === "" || s === "-" || s === "--") return null;
+  const m = String(s).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+function parseGmp(raw) {
+  const t = strip(raw);
+  const rupee = t.match(/₹\s*(-?\d+(?:\.\d+)?)/);
+  const pct = t.match(/\((-?\d+(?:\.\d+)?)%\)/);
+  const gmp = rupee ? parseFloat(rupee[1]) : 0;
+  return { gmp: gmp, pct: pct ? parseFloat(pct[1]) : null };
+}
+function inr(n) {
+  if (n == null || Number.isNaN(n)) return "\u2014";
+  return "\u20b9" + Math.round(n).toLocaleString("en-IN");
+}
+function fmtISO(iso) {
+  if (!iso) return "\u2014";
+  const [y,m,d] = iso.split("-").map(Number);
+  return new Date(y, m-1, d).toLocaleDateString("en-IN", { day:"numeric", month:"short" });
+}
+function statusLabel(code, open, close) {
+  if (code === "O") return "open";
+  if (code === "U") return "upcoming";
+  if (code === "C" || code === "LN" || code === "LP") return "closed";
+  if (open && close) {
+    const t = new Date(); t.setHours(0,0,0,0);
+    const o = new Date(open + "T00:00:00");
+    const c = new Date(close + "T00:00:00");
+    if (t < o) return "upcoming";
+    if (t > c) return "closed";
+    return "open";
+  }
+  return "upcoming";
+}
+function parseRow(row) {
+  const name = row["~ipo_name"] || strip(row.Name);
+  const cat = (row["~IPO_Category"] || row["~ipo_category1"] || "").toUpperCase().includes("SME") ? "sme" : "mainboard";
+  const g = parseGmp(row.GMP);
+  const price = num(row["Price (\u20b9)"]);
+  const lot = num(row.Lot);
+  const pct = g.pct != null ? g.pct : (price && g.gmp ? (g.gmp / price) * 100 : 0);
+  return {
+    id: row["~id"] || name, name, cat,
+    flag: row["~ipo_status1"] || "",
+    open: row["~Srt_Open"] || null,
+    close: row["~Srt_Close"] || null,
+    allot: row["~Srt_BoA_Dt"] || null,
+    listing: row["~Str_Listing"] || null,
+    price, lot, size: strip(row["IPO Size"]), sub: num(row.Sub),
+    gmp: g.gmp, pct, ticket: (price && lot) ? price * lot : null,
+    updated: strip(row["Updated-On"])
+  };
+}
+function score(it, budget, subX) {
+  const st = statusLabel(it.flag, it.open, it.close);
+  it.status = st;
+  if (st === "closed") { it.verdict = "SKIP"; it.why = "Closed / listing pending."; it.ev = -1; return it; }
+  if (it.cat === "sme") {
+    it.verdict = "SKIP";
+    it.why = it.ticket && it.ticket > budget ? "SME ticket too big for the account budget." : "SME — skip unless you want illiquid names.";
+    it.ev = -1; return it;
+  }
+  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "No price band / lot yet. Cannot size a slot."; it.ev = 0; return it; }
+  if (it.ticket > budget / 2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big for two-lot accounts."; it.ev = -1; return it; }
+  const heatSub = Math.max(8, 12 + it.pct * 1.15);
+  const usedSub = it.sub && it.sub > 1 ? it.sub : (subX || heatSub);
+  const p = usedSub <= 1 ? 1 : 1 / usedSub;
+  it.ev = p * it.gmp * it.lot;
+  if (it.pct < 8 && it.gmp <= 0) { it.verdict = "SKIP"; it.why = "Grey market is flat."; return it; }
+  if (it.pct < 12) { it.verdict = "WATCH"; it.why = "GMP under 12%. Keep slots for fatter names."; return it; }
+  it.verdict = "APPLY";
+  it.why = "Mainboard ticket ready. GMP ~" + it.pct.toFixed(0) + "%.";
+  return it;
+}
+function pickSlots(items) {
+  const apply = items.filter(x => x.verdict === "APPLY").sort((a,b) => {
+    const da = a.open || "9999", db = b.open || "9999";
+    if (da !== db) return da.localeCompare(db);
+    return (b.ev || 0) - (a.ev || 0);
+  });
+  const byEv = items.filter(x => x.verdict === "APPLY").slice().sort((a,b) => (b.ev||0)-(a.ev||0));
+  const slot1 = apply[0] || null;
+  const slot2 = byEv.find(x => slot1 && x.id !== slot1.id) || apply[1] || null;
+  items.forEach(x => { x.slot = null; });
+  if (slot1) slot1.slot = 1;
+  if (slot2) slot2.slot = 2;
+  items.filter(x => x.verdict === "APPLY" && !x.slot).forEach(x => {
+    x.verdict = "WATCH"; x.why = "Fits an apply, but only two slots exist.";
+  });
+  return { slot1, slot2 };
+}
+let cache = [];
+let meta = {};
+function render(items) {
+  const pans = Math.max(1, parseInt(document.getElementById("pans").value,10) || 4);
+  const budget = parseFloat(document.getElementById("budget").value) || 28000;
+  const subX = parseFloat(document.getElementById("subX").value) || 40;
+  items.forEach(it => score(it, budget, subX));
+  const picked = pickSlots(items);
+  const slot1 = picked.slot1, slot2 = picked.slot2;
+  const visible = items.filter(x => x.status !== "closed").sort((a,b) => {
+    const rank = { APPLY:0, WATCH:1, SKIP:2 };
+    const d = rank[a.verdict]-rank[b.verdict];
+    if (d) return d;
+    if ((a.slot||9) !== (b.slot||9)) return (a.slot||9)-(b.slot||9);
+    return (b.pct||0)-(a.pct||0);
+  });
+  const t1 = slot1 && slot1.ticket, t2 = slot2 && slot2.ticket;
+  const used = (t1||0)+(t2||0);
+  document.getElementById("stamp").textContent = "Live " + (meta.time || new Date().toLocaleString("en-IN"));
+  document.getElementById("plan").innerHTML =
+    "<h2>Live two-slot plan</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>" +
+    (slot1 ? slot1.name : "HOLD CASH") + "</strong><p>" +
+    (slot1 ? (fmtISO(slot1.open) + "–" + fmtISO(slot1.close) + " · " + inr(t1) + " · GMP ₹" + slot1.gmp) : "No eligible mainboard.") +
+    "</p></div><div class=\"slotbox\"><h3>Slot 2</h3><strong>" +
+    (slot2 ? slot2.name : "HOLD CASH") + "</strong><p>" +
+    (slot2 ? (fmtISO(slot2.open) + "–" + fmtISO(slot2.close) + " · " + inr(t2) + " · GMP ₹" + slot2.gmp) : "Second slot empty.") +
+    "</p></div></div><p class=\"why\" style=\"margin-top:10px\">" +
+    (slot1 && slot2 ? ("Apply both on all " + pans + " accounts. Blocked ≈ " + inr(used) + " per account.") : "Waiting on band + lot + GMP.") + "</p>";
+  document.getElementById("list").innerHTML = visible.map(it =>
+    "<article class=\"card\"><div class=\"row1\"><div><div class=\"name\">" + it.name +
+    "</div><div class=\"subn\">" + (it.slot ? "SLOT " + it.slot + " · " : "") + it.cat + " · " + it.status +
+    " · " + fmtISO(it.open) + "–" + fmtISO(it.close) + "</div></div><span class=\"verdict v-" + it.verdict + "\">" +
+    (it.slot ? "SLOT " + it.slot + " · " : "") + it.verdict + "</span></div><div class=\"stats\">" +
+    "<div class=\"stat\"><b>" + (it.price ? "₹"+it.price : "TBA") + "</b><span>Cap price</span></div>" +
+    "<div class=\"stat\"><b>" + (it.gmp != null ? "₹"+it.gmp+" · "+it.pct.toFixed(0)+"%" : "—") + "</b><span>Live GMP</span></div>" +
+    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket) : "—") + "</b><span>1 account</span></div>" +
+    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket*pans) : "—") + "</b><span>" + pans + " PANs</span></div>" +
+    "<div class=\"stat\"><b>" + (it.size || "—") + "</b><span>Issue size</span></div></div><p class=\"why\">" +
+    it.why + (it.sub ? " Live sub " + it.sub + "x." : "") + "</p></article>"
+  ).join("");
+}
+async function load() {
+  const btn = document.getElementById("btn");
+  const err = document.getElementById("err");
+  btn.disabled = true; btn.textContent = "Fetching…";
+  err.hidden = true;
+  try {
+    const res = await fetch(FEED + Date.now(), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const data = await res.json();
+    const rows = data.reportTableData || [];
+    if (!rows.length) throw new Error("Empty table");
+    cache = rows.map(parseRow);
+    meta = { time: data.currentTime || new Date().toLocaleString("en-IN") };
+    render(cache);
+  } catch (e) {
+    err.hidden = false;
+    err.textContent = "Live fetch failed (" + e.message + "). Need internet.";
+    if (cache.length) render(cache);
+  } finally {
+    btn.disabled = false; btn.textContent = "Refresh live data";
+  }
+}
+["pans","budget","subX"].forEach(id => {
+  document.getElementById(id).addEventListener("input", () => { if (cache.length) render(cache); });
+});
+load();
+</script>
+</body>
+</html>
