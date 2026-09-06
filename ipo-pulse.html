@@ -3,22 +3,20 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>IPO Pulse — live desk</title>
+<title>IPO Pulse — listing flip desk</title>
 <style>
   :root { --ink:#16181E; --muted:#6A6F7A; --line:#D7D4CB; --paper:#E8E6DE; --card:#FFFffb;
     --apply:#1B7A4A; --apply-bg:#E3F4EA; --watch:#8A5A12; --watch-bg:#F6EBD8;
-    --skip:#9A3B32; --skip-bg:#F8E6E3; --navy:#1F3A5F; }
+    --skip:#9A3B32; --skip-bg:#F8E6E3; }
   * { box-sizing: border-box; }
   body { margin:0; background:var(--paper); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
   .wrap { max-width:1100px; margin:0 auto; padding:22px 16px 64px; }
   .hero { background:var(--ink); color:#F4F3EE; border-radius:16px; padding:22px 24px 18px; }
   .hero h1 { font-family:Georgia,serif; margin:0 0 6px; font-size:28px; }
-  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:760px; }
+  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:780px; }
   .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center; }
   .chip { background:#2A2D36; color:#EDEBE2; font-size:12px; padding:4px 10px; border-radius:999px; }
-  .refresh { border:0; background:#F4F3EE; color:var(--ink); font-weight:700; font-size:13px;
-    padding:7px 14px; border-radius:999px; cursor:pointer; }
-  .refresh:disabled { opacity:.6; }
+  .refresh { border:0; background:#F4F3EE; color:var(--ink); font-weight:700; font-size:13px; padding:7px 14px; border-radius:999px; cursor:pointer; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin:16px 0 8px; }
   .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); font-weight:600; }
   .field input { font:inherit; color:var(--ink); padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; width:110px; }
@@ -52,10 +50,10 @@
 <div class="wrap">
   <header class="hero">
     <h1>IPO Pulse</h1>
-    <p>Live feed from InvestorGain, scored for your desk: 4 PANs, two mainboard lots per account. Refresh pulls GMP, dates, lot and size — then the engine picks Slot 1 and Slot 2.</p>
+    <p>Listing-day flip desk. Not a hold tool. Live InvestorGain tape → estimate listing pop (75% of GMP, because GMP overstates) → multiply by 4-PAN allotment odds → pick two slots. Exit plan is sell on listing, not invest in the company.</p>
     <div class="meta">
       <span class="chip" id="stamp">Not loaded</span>
-      <span class="chip">source: investorgain live table</span>
+      <span class="chip">flip only · no hold score</span>
       <button class="refresh" id="btn" onclick="load()">Refresh live data</button>
     </div>
   </header>
@@ -67,10 +65,11 @@
   <div id="err" hidden class="err"></div>
   <div class="plan" id="plan">Loading live IPO table…</div>
   <div class="grid" id="list"></div>
-  <p class="note">GMP is unofficial grey-market data from InvestorGain, not a listing guarantee. Closed rows are dropped. SME is skipped unless one lot fits the account budget. Open this file over http(s) or as a local file with internet on.</p>
+  <p class="note">Expected listing uses 75% of printed GMP (grey market usually overstates the open). Family EV = chance at least one of 4 PANs is allotted × haircut GMP × lot shares. High GMP with nuclear retail sub can lose to a quieter 20% name. GMP is unofficial. Sell on listing — this page does not score 1-year hold quality.</p>
 </div>
 <script>
 const FEED = "https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/9/2026/2026-27/0/all?search=&v=";
+const GMP_HAIRCUT = 0.75;
 function strip(html) {
   if (html == null) return "";
   const d = document.createElement("div");
@@ -86,8 +85,7 @@ function parseGmp(raw) {
   const t = strip(raw);
   const rupee = t.match(/₹\s*(-?\d+(?:\.\d+)?)/);
   const pct = t.match(/\((-?\d+(?:\.\d+)?)%\)/);
-  const gmp = rupee ? parseFloat(rupee[1]) : 0;
-  return { gmp: gmp, pct: pct ? parseFloat(pct[1]) : null };
+  return { gmp: rupee ? parseFloat(rupee[1]) : 0, pct: pct ? parseFloat(pct[1]) : null };
 }
 function inr(n) {
   if (n == null || Number.isNaN(n)) return "\u2014";
@@ -124,32 +122,42 @@ function parseRow(row) {
     flag: row["~ipo_status1"] || "",
     open: row["~Srt_Open"] || null,
     close: row["~Srt_Close"] || null,
-    allot: row["~Srt_BoA_Dt"] || null,
     listing: row["~Str_Listing"] || null,
     price, lot, size: strip(row["IPO Size"]), sub: num(row.Sub),
-    gmp: g.gmp, pct, ticket: (price && lot) ? price * lot : null,
-    updated: strip(row["Updated-On"])
+    gmp: g.gmp, pct, ticket: (price && lot) ? price * lot : null
   };
 }
-function score(it, budget, subX) {
+function score(it, budget, subX, pans) {
   const st = statusLabel(it.flag, it.open, it.close);
   it.status = st;
-  if (st === "closed") { it.verdict = "SKIP"; it.why = "Closed / listing pending."; it.ev = -1; return it; }
+  if (st === "closed") { it.verdict = "SKIP"; it.why = "Closed. Flip window missed."; it.ev = -1; return it; }
   if (it.cat === "sme") {
-    it.verdict = "SKIP";
-    it.why = it.ticket && it.ticket > budget ? "SME ticket too big for the account budget." : "SME — skip unless you want illiquid names.";
-    it.ev = -1; return it;
+    it.verdict = "SKIP"; it.why = "SME listing-day exit is a bad flip: circuits, thin book, hard to dump 4 lots."; it.ev = -1; return it;
   }
-  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "No price band / lot yet. Cannot size a slot."; it.ev = 0; return it; }
-  if (it.ticket > budget / 2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big for two-lot accounts."; it.ev = -1; return it; }
-  const heatSub = Math.max(8, 12 + it.pct * 1.15);
+  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "No band/lot. Cannot size the ₹14k flip."; it.ev = 0; return it; }
+  if (it.ticket > budget / 2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big for two-slot accounts."; it.ev = -1; return it; }
+  const heatSub = Math.max(8, 10 + it.pct * 1.2);
   const usedSub = it.sub && it.sub > 1 ? it.sub : (subX || heatSub);
-  const p = usedSub <= 1 ? 1 : 1 / usedSub;
-  it.ev = p * it.gmp * it.lot;
-  if (it.pct < 8 && it.gmp <= 0) { it.verdict = "SKIP"; it.why = "Grey market is flat."; return it; }
-  if (it.pct < 12) { it.verdict = "WATCH"; it.why = "GMP under 12%. Keep slots for fatter names."; return it; }
+  const pOne = usedSub <= 1 ? 1 : 1 / usedSub;
+  const pFam = 1 - Math.pow(1 - pOne, pans);
+  const expGmp = Math.max(0, it.gmp) * GMP_HAIRCUT;
+  const expPct = it.pct * GMP_HAIRCUT;
+  it.ev = pFam * expGmp * it.lot;
+  it.estSub = usedSub;
+  it.pFam = pFam;
+  it.expPct = expPct;
+  if (it.gmp <= 0 || expPct < 8) {
+    it.verdict = "SKIP";
+    it.why = "After 25% GMP haircut, expected listing pop is too thin to flip.";
+    return it;
+  }
+  if (expPct < 12) {
+    it.verdict = "WATCH";
+    it.why = "Haircut listing ~" + expPct.toFixed(0) + "%. Weak flip. Hold the slot for a fatter name.";
+    return it;
+  }
   it.verdict = "APPLY";
-  it.why = "Mainboard ticket ready. GMP ~" + it.pct.toFixed(0) + "%.";
+  it.why = "Flip EV across " + pans + " PANs ≈ " + inr(it.ev) + " (p(allot)≈" + (pFam*100).toFixed(0) + "% at " + usedSub.toFixed(0) + "x, listing ~" + expPct.toFixed(0) + "% after haircut). Sell on listing.";
   return it;
 }
 function pickSlots(items) {
@@ -165,7 +173,8 @@ function pickSlots(items) {
   if (slot1) slot1.slot = 1;
   if (slot2) slot2.slot = 2;
   items.filter(x => x.verdict === "APPLY" && !x.slot).forEach(x => {
-    x.verdict = "WATCH"; x.why = "Fits an apply, but only two slots exist.";
+    x.verdict = "WATCH";
+    x.why = "Positive flip EV, but only two slots. Capital already assigned.";
   });
   return { slot1, slot2 };
 }
@@ -175,7 +184,7 @@ function render(items) {
   const pans = Math.max(1, parseInt(document.getElementById("pans").value,10) || 4);
   const budget = parseFloat(document.getElementById("budget").value) || 28000;
   const subX = parseFloat(document.getElementById("subX").value) || 40;
-  items.forEach(it => score(it, budget, subX));
+  items.forEach(it => score(it, budget, subX, pans));
   const picked = pickSlots(items);
   const slot1 = picked.slot1, slot2 = picked.slot2;
   const visible = items.filter(x => x.status !== "closed").sort((a,b) => {
@@ -183,31 +192,32 @@ function render(items) {
     const d = rank[a.verdict]-rank[b.verdict];
     if (d) return d;
     if ((a.slot||9) !== (b.slot||9)) return (a.slot||9)-(b.slot||9);
-    return (b.pct||0)-(a.pct||0);
+    return (b.ev||0)-(a.ev||0);
   });
   const t1 = slot1 && slot1.ticket, t2 = slot2 && slot2.ticket;
   const used = (t1||0)+(t2||0);
   document.getElementById("stamp").textContent = "Live " + (meta.time || new Date().toLocaleString("en-IN"));
   document.getElementById("plan").innerHTML =
-    "<h2>Live two-slot plan</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>" +
+    "<h2>Two-slot listing flip · sell on listing day</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>" +
     (slot1 ? slot1.name : "HOLD CASH") + "</strong><p>" +
-    (slot1 ? (fmtISO(slot1.open) + "–" + fmtISO(slot1.close) + " · " + inr(t1) + " · GMP ₹" + slot1.gmp) : "No eligible mainboard.") +
+    (slot1 ? (fmtISO(slot1.open) + "–" + fmtISO(slot1.close) + " · block " + inr(t1) + " · flip EV " + inr(slot1.ev)) : "No eligible flip.") +
     "</p></div><div class=\"slotbox\"><h3>Slot 2</h3><strong>" +
     (slot2 ? slot2.name : "HOLD CASH") + "</strong><p>" +
-    (slot2 ? (fmtISO(slot2.open) + "–" + fmtISO(slot2.close) + " · " + inr(t2) + " · GMP ₹" + slot2.gmp) : "Second slot empty.") +
+    (slot2 ? (fmtISO(slot2.open) + "–" + fmtISO(slot2.close) + " · block " + inr(t2) + " · flip EV " + inr(slot2.ev)) : "Second slot empty.") +
     "</p></div></div><p class=\"why\" style=\"margin-top:10px\">" +
-    (slot1 && slot2 ? ("Apply both on all " + pans + " accounts. Blocked ≈ " + inr(used) + " per account.") : "Waiting on band + lot + GMP.") + "</p>";
+    (slot1 && slot2 ? ("Apply both on all " + pans + " PANs. Blocked ≈ " + inr(used) + " / account. Combined flip EV ≈ " + inr((slot1.ev||0)+(slot2.ev||0)) + ". Sell allotted stock on listing.") : "No clean flip pair yet.") + "</p>";
   document.getElementById("list").innerHTML = visible.map(it =>
     "<article class=\"card\"><div class=\"row1\"><div><div class=\"name\">" + it.name +
     "</div><div class=\"subn\">" + (it.slot ? "SLOT " + it.slot + " · " : "") + it.cat + " · " + it.status +
-    " · " + fmtISO(it.open) + "–" + fmtISO(it.close) + "</div></div><span class=\"verdict v-" + it.verdict + "\">" +
+    " · " + fmtISO(it.open) + "–" + fmtISO(it.close) + (it.listing ? " · lists " + fmtISO(it.listing) : "") +
+    "</div></div><span class=\"verdict v-" + it.verdict + "\">" +
     (it.slot ? "SLOT " + it.slot + " · " : "") + it.verdict + "</span></div><div class=\"stats\">" +
     "<div class=\"stat\"><b>" + (it.price ? "₹"+it.price : "TBA") + "</b><span>Cap price</span></div>" +
-    "<div class=\"stat\"><b>" + (it.gmp != null ? "₹"+it.gmp+" · "+it.pct.toFixed(0)+"%" : "—") + "</b><span>Live GMP</span></div>" +
-    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket) : "—") + "</b><span>1 account</span></div>" +
-    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket*pans) : "—") + "</b><span>" + pans + " PANs</span></div>" +
-    "<div class=\"stat\"><b>" + (it.size || "—") + "</b><span>Issue size</span></div></div><p class=\"why\">" +
-    it.why + (it.sub ? " Live sub " + it.sub + "x." : "") + "</p></article>"
+    "<div class=\"stat\"><b>" + (it.gmp != null ? "₹"+it.gmp+" · "+it.pct.toFixed(0)+"%" : "—") + "</b><span>Raw GMP</span></div>" +
+    "<div class=\"stat\"><b>" + (it.expPct != null ? it.expPct.toFixed(0)+"%" : "—") + "</b><span>Haircut listing</span></div>" +
+    "<div class=\"stat\"><b>" + (it.ev != null && it.ev>=0 ? inr(it.ev) : "—") + "</b><span>4-PAN flip EV</span></div>" +
+    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket) : "—") + "</b><span>Blocked / acct</span></div></div><p class=\"why\">" +
+    it.why + "</p></article>"
   ).join("");
 }
 async function load() {
