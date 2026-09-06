@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>IPO Pulse — listing flip desk</title>
+<title>IPO Pulse — multi-source listing flip</title>
 <style>
   :root { --ink:#16181E; --muted:#6A6F7A; --line:#D7D4CB; --paper:#E8E6DE; --card:#FFFffb;
     --apply:#1B7A4A; --apply-bg:#E3F4EA; --watch:#8A5A12; --watch-bg:#F6EBD8;
@@ -13,9 +13,11 @@
   .wrap { max-width:1100px; margin:0 auto; padding:22px 16px 64px; }
   .hero { background:var(--ink); color:#F4F3EE; border-radius:16px; padding:22px 24px 18px; }
   .hero h1 { font-family:Georgia,serif; margin:0 0 6px; font-size:28px; }
-  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:780px; }
+  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:800px; }
   .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center; }
   .chip { background:#2A2D36; color:#EDEBE2; font-size:12px; padding:4px 10px; border-radius:999px; }
+  .chip.ok { background:#1F3D2C; color:#B6E3C6; }
+  .chip.bad { background:#3D2220; color:#F0B8B3; }
   .refresh { border:0; background:#F4F3EE; color:var(--ink); font-weight:700; font-size:13px; padding:7px 14px; border-radius:999px; cursor:pointer; }
   .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin:16px 0 8px; }
   .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); font-weight:600; }
@@ -50,26 +52,30 @@
 <div class="wrap">
   <header class="hero">
     <h1>IPO Pulse</h1>
-    <p>Listing-day flip desk. Not a hold tool. Live InvestorGain tape → estimate listing pop (75% of GMP, because GMP overstates) → multiply by 4-PAN allotment odds → pick two slots. Exit plan is sell on listing, not invest in the company.</p>
-    <div class="meta">
+    <p>Listing-day flip desk. Pulls InvestorGain JSON and IPOWatch (direct + CORS proxy). GMP is the median of desks that answered. If one vendor dies, the other still fills the board.</p>
+    <div class="meta" id="srcchips">
       <span class="chip" id="stamp">Not loaded</span>
-      <span class="chip">flip only · no hold score</span>
-      <button class="refresh" id="btn" onclick="load()">Refresh live data</button>
+      <button class="refresh" id="btn" onclick="load()">Refresh all sources</button>
     </div>
   </header>
   <div class="controls">
     <label class="field">PANs <input id="pans" type="number" min="1" value="4" /></label>
-    <label class="field">₹ / account <input id="budget" type="number" min="14000" step="500" value="28000" /></label>
-    <label class="field">Assume retail × <input id="subX" type="number" min="1" value="40" /></label>
+    <label class="field">Rs / account <input id="budget" type="number" min="14000" step="500" value="28000" /></label>
+    <label class="field">Assume retail x <input id="subX" type="number" min="1" value="40" /></label>
   </div>
   <div id="err" hidden class="err"></div>
-  <div class="plan" id="plan">Loading live IPO table…</div>
+  <div class="plan" id="plan">Loading sources...</div>
   <div class="grid" id="list"></div>
-  <p class="note">Expected listing uses 75% of printed GMP (grey market usually overstates the open). Family EV = chance at least one of 4 PANs is allotted × haircut GMP × lot shares. High GMP with nuclear retail sub can lose to a quieter 20% name. GMP is unofficial. Sell on listing — this page does not score 1-year hold quality.</p>
+  <p class="note">Median GMP across live desks, then 25% haircut for expected listing open. Family EV = P(at least one of 4 PANs allotted) x haircut GMP x lot. Sell on listing.</p>
 </div>
 <script>
-const FEED = "https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/9/2026/2026-27/0/all?search=&v=";
 const GMP_HAIRCUT = 0.75;
+const IG = "https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/9/2026/2026-27/0/all?search=&v=";
+const IW = "https://ipowatch.in/ipo-grey-market-premium-latest-ipo-gmp/";
+const PROXIES = [
+  u => "https://api.allorigins.win/raw?url=" + encodeURIComponent(u),
+  u => "https://corsproxy.io/?" + encodeURIComponent(u)
+];
 function strip(html) {
   if (html == null) return "";
   const d = document.createElement("div");
@@ -77,174 +83,176 @@ function strip(html) {
   return (d.textContent || "").replace(/\s+/g, " ").trim();
 }
 function num(s) {
-  if (s == null || s === "" || s === "-" || s === "--") return null;
+  if (s == null || s === "" || s === "-" || s === "--" || s === "Rs-" || s === "\u20b9-") return null;
   const m = String(s).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
   return m ? parseFloat(m[0]) : null;
 }
-function parseGmp(raw) {
-  const t = strip(raw);
-  const rupee = t.match(/₹\s*(-?\d+(?:\.\d+)?)/);
-  const pct = t.match(/\((-?\d+(?:\.\d+)?)%\)/);
-  return { gmp: rupee ? parseFloat(rupee[1]) : 0, pct: pct ? parseFloat(pct[1]) : null };
+function keyName(s) {
+  return String(s || "").toLowerCase().replace(/&/g, "and").replace(/\b(limited|ltd|ipo|sme|mainboard)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
 }
 function inr(n) {
-  if (n == null || Number.isNaN(n)) return "\u2014";
-  return "\u20b9" + Math.round(n).toLocaleString("en-IN");
+  if (n == null || Number.isNaN(n)) return "-";
+  return "Rs " + Math.round(n).toLocaleString("en-IN");
 }
 function fmtISO(iso) {
-  if (!iso) return "\u2014";
+  if (!iso) return "-";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
   const [y,m,d] = iso.split("-").map(Number);
   return new Date(y, m-1, d).toLocaleDateString("en-IN", { day:"numeric", month:"short" });
 }
-function statusLabel(code, open, close) {
-  if (code === "O") return "open";
-  if (code === "U") return "upcoming";
-  if (code === "C" || code === "LN" || code === "LP") return "closed";
-  if (open && close) {
-    const t = new Date(); t.setHours(0,0,0,0);
-    const o = new Date(open + "T00:00:00");
-    const c = new Date(close + "T00:00:00");
-    if (t < o) return "upcoming";
-    if (t > c) return "closed";
-    return "open";
-  }
-  return "upcoming";
+function median(arr) {
+  const a = arr.filter(x => x != null && !Number.isNaN(x)).sort((x,y)=>x-y);
+  if (!a.length) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : (a[mid-1] + a[mid]) / 2;
 }
-function parseRow(row) {
-  const name = row["~ipo_name"] || strip(row.Name);
-  const cat = (row["~IPO_Category"] || row["~ipo_category1"] || "").toUpperCase().includes("SME") ? "sme" : "mainboard";
-  const g = parseGmp(row.GMP);
-  const price = num(row["Price (\u20b9)"]);
-  const lot = num(row.Lot);
-  const pct = g.pct != null ? g.pct : (price && g.gmp ? (g.gmp / price) * 100 : 0);
-  return {
-    id: row["~id"] || name, name, cat,
-    flag: row["~ipo_status1"] || "",
-    open: row["~Srt_Open"] || null,
-    close: row["~Srt_Close"] || null,
-    listing: row["~Str_Listing"] || null,
-    price, lot, size: strip(row["IPO Size"]), sub: num(row.Sub),
-    gmp: g.gmp, pct, ticket: (price && lot) ? price * lot : null
-  };
+function parseGmpCell(raw) {
+  const t = strip(raw);
+  const rupee = t.match(/(?:\u20b9|Rs)\s*(-?\d+(?:\.\d+)?)/) || t.match(/(-?\d+(?:\.\d+)?)/);
+  const pct = t.match(/\((-?\d+(?:\.\d+)?)%\)/);
+  return { gmp: rupee ? parseFloat(rupee[1]) : 0, pct: pct ? parseFloat(pct[1]) : null };
+}
+function parseInvestorGain(data) {
+  return ((data && data.reportTableData) || []).map(row => {
+    const name = row["~ipo_name"] || strip(row.Name);
+    const g = parseGmpCell(row.GMP);
+    const price = num(row["Price (\u20b9)"]);
+    const lot = num(row.Lot);
+    const cat = (row["~IPO_Category"] || "").toUpperCase().includes("SME") ? "sme" : "mainboard";
+    const flag = row["~ipo_status1"] || "";
+    let status = "upcoming";
+    if (flag === "O") status = "open";
+    if (flag === "C" || flag === "LN" || flag === "LP") status = "closed";
+    return { key: keyName(name), name, cat, status, open: row["~Srt_Open"] || null, close: row["~Srt_Close"] || null, listing: row["~Str_Listing"] || null, price, lot, size: strip(row["IPO Size"]), sub: num(row.Sub), gmpIG: g.gmp, pctIG: g.pct != null ? g.pct : (price && g.gmp ? (g.gmp/price)*100 : null) };
+  });
+}
+function parseIpoWatch(html) {
+  const doc = new DOMParser().parseFromString(html, "text/html");
+  const table = doc.querySelector("table");
+  if (!table) return [];
+  const out = [];
+  table.querySelectorAll("tr").forEach(tr => {
+    const cells = [...tr.querySelectorAll("td")].map(td => strip(td.innerHTML));
+    if (cells.length < 6 || /ipo name/i.test(cells[0])) return;
+    const name = cells[0];
+    const gmp = num(cells[1]);
+    const prices = (cells[3] || "").match(/(\d+(?:\.\d+)?)/g);
+    const price = prices ? parseFloat(prices[prices.length-1]) : null;
+    const statusRaw = (cells[6] || "").toLowerCase();
+    let status = "upcoming";
+    if (statusRaw.includes("open")) status = "open";
+    if (statusRaw.includes("close") || statusRaw.includes("listed") || statusRaw.includes("allot")) status = "closed";
+    out.push({ key: keyName(name), name, cat: /sme/i.test(name) ? "sme" : "mainboard", status, price, lot: null, size: "", sub: null, gmpIW: gmp, pctIW: price && gmp != null ? (gmp/price)*100 : null });
+  });
+  return out;
+}
+function merge(igRows, iwRows) {
+  const map = new Map();
+  function add(row, src) {
+    const cur = map.get(row.key) || { key: row.key, name: row.name, sources: [], gmps: [], pcts: [] };
+    if (row.name && row.name.length > (cur.name||"").length) cur.name = row.name;
+    if (row.cat) cur.cat = cur.cat || row.cat;
+    if (row.status === "open") cur.status = "open";
+    else if (!cur.status) cur.status = row.status;
+    if (row.status === "closed") cur.status = "closed";
+    cur.open = cur.open || row.open; cur.close = cur.close || row.close; cur.listing = cur.listing || row.listing;
+    cur.price = cur.price || row.price; cur.lot = cur.lot || row.lot; cur.size = cur.size || row.size; cur.sub = cur.sub || row.sub;
+    if (!cur.sources.includes(src)) cur.sources.push(src);
+    if (src === "investorgain" && row.gmpIG != null) { cur.gmps.push(row.gmpIG); if (row.pctIG != null) cur.pcts.push(row.pctIG); }
+    if (src === "ipowatch" && row.gmpIW != null) { cur.gmps.push(row.gmpIW); if (row.pctIW != null) cur.pcts.push(row.pctIW); }
+    map.set(row.key, cur);
+  }
+  igRows.forEach(r => add(r, "investorgain"));
+  iwRows.forEach(r => add(r, "ipowatch"));
+  return [...map.values()].map(it => {
+    it.gmp = median(it.gmps) || 0;
+    it.pct = median(it.pcts) || (it.price && it.gmp ? (it.gmp/it.price)*100 : 0);
+    it.ticket = (it.price && it.lot) ? it.price * it.lot : null;
+    it.srcLabel = it.sources.join(" + ");
+    it.agree = it.gmps.length >= 2 && Math.abs((it.gmps[0]||0)-(it.gmps[1]||0)) <= Math.max(8, 0.15*Math.max(...it.gmps.map(Math.abs),1));
+    return it;
+  });
 }
 function score(it, budget, subX, pans) {
-  const st = statusLabel(it.flag, it.open, it.close);
-  it.status = st;
-  if (st === "closed") { it.verdict = "SKIP"; it.why = "Closed. Flip window missed."; it.ev = -1; return it; }
-  if (it.cat === "sme") {
-    it.verdict = "SKIP"; it.why = "SME listing-day exit is a bad flip: circuits, thin book, hard to dump 4 lots."; it.ev = -1; return it;
-  }
-  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "No band/lot. Cannot size the ₹14k flip."; it.ev = 0; return it; }
-  if (it.ticket > budget / 2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big for two-slot accounts."; it.ev = -1; return it; }
+  if (it.status === "closed") { it.verdict = "SKIP"; it.why = "Closed. Flip window missed."; it.ev = -1; return it; }
+  if (it.cat === "sme") { it.verdict = "SKIP"; it.why = "SME listing-day exit is a bad flip."; it.ev = -1; return it; }
+  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "Band/lot missing on every live source."; it.ev = 0; return it; }
+  if (it.ticket > budget/2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big for two-slot accounts."; it.ev = -1; return it; }
   const heatSub = Math.max(8, 10 + it.pct * 1.2);
   const usedSub = it.sub && it.sub > 1 ? it.sub : (subX || heatSub);
-  const pOne = usedSub <= 1 ? 1 : 1 / usedSub;
-  const pFam = 1 - Math.pow(1 - pOne, pans);
-  const expGmp = Math.max(0, it.gmp) * GMP_HAIRCUT;
-  const expPct = it.pct * GMP_HAIRCUT;
-  it.ev = pFam * expGmp * it.lot;
-  it.estSub = usedSub;
-  it.pFam = pFam;
-  it.expPct = expPct;
-  if (it.gmp <= 0 || expPct < 8) {
-    it.verdict = "SKIP";
-    it.why = "After 25% GMP haircut, expected listing pop is too thin to flip.";
-    return it;
-  }
-  if (expPct < 12) {
-    it.verdict = "WATCH";
-    it.why = "Haircut listing ~" + expPct.toFixed(0) + "%. Weak flip. Hold the slot for a fatter name.";
-    return it;
-  }
-  it.verdict = "APPLY";
-  it.why = "Flip EV across " + pans + " PANs ≈ " + inr(it.ev) + " (p(allot)≈" + (pFam*100).toFixed(0) + "% at " + usedSub.toFixed(0) + "x, listing ~" + expPct.toFixed(0) + "% after haircut). Sell on listing.";
+  const pFam = 1 - Math.pow(1 - (usedSub<=1?1:1/usedSub), pans);
+  it.expPct = it.pct * GMP_HAIRCUT;
+  it.ev = pFam * Math.max(0, it.gmp) * GMP_HAIRCUT * it.lot;
+  if (it.gmp <= 0 || it.expPct < 8) { it.verdict = "SKIP"; it.why = "Median GMP after haircut is too thin to flip."; return it; }
+  if (it.expPct < 12) { it.verdict = "WATCH"; it.why = "Haircut listing ~" + it.expPct.toFixed(0) + "%. Weak flip."; return it; }
+  const conf = it.sources.length > 1 ? (it.agree ? "desks agree" : "desks differ — using median") : "single desk";
+  it.verdict = "APPLY"; it.why = "Flip EV " + inr(it.ev) + " across " + pans + " PANs · " + conf + " · sell on listing.";
   return it;
 }
 function pickSlots(items) {
-  const apply = items.filter(x => x.verdict === "APPLY").sort((a,b) => {
-    const da = a.open || "9999", db = b.open || "9999";
-    if (da !== db) return da.localeCompare(db);
-    return (b.ev || 0) - (a.ev || 0);
-  });
-  const byEv = items.filter(x => x.verdict === "APPLY").slice().sort((a,b) => (b.ev||0)-(a.ev||0));
+  const apply = items.filter(x => x.verdict === "APPLY").sort((a,b) => ((a.open||"9999").localeCompare(b.open||"9999")) || ((b.ev||0)-(a.ev||0)));
+  const byEv = items.filter(x => x.verdict === "APPLY").slice().sort((a,b)=>(b.ev||0)-(a.ev||0));
   const slot1 = apply[0] || null;
-  const slot2 = byEv.find(x => slot1 && x.id !== slot1.id) || apply[1] || null;
-  items.forEach(x => { x.slot = null; });
-  if (slot1) slot1.slot = 1;
-  if (slot2) slot2.slot = 2;
-  items.filter(x => x.verdict === "APPLY" && !x.slot).forEach(x => {
-    x.verdict = "WATCH";
-    x.why = "Positive flip EV, but only two slots. Capital already assigned.";
-  });
+  const slot2 = byEv.find(x => slot1 && x.key !== slot1.key) || apply[1] || null;
+  items.forEach(x => x.slot = null);
+  if (slot1) slot1.slot = 1; if (slot2) slot2.slot = 2;
+  items.filter(x => x.verdict === "APPLY" && !x.slot).forEach(x => { x.verdict = "WATCH"; x.why = "Positive flip EV, but only two slots."; });
   return { slot1, slot2 };
 }
-let cache = [];
-let meta = {};
+let cache = []; let health = {};
+function setChips() {
+  const wrap = document.getElementById("srcchips"); const btn = document.getElementById("btn");
+  wrap.innerHTML = "";
+  wrap.appendChild(Object.assign(document.createElement("span"), { className:"chip", id:"stamp", textContent: health.time ? "Merged " + health.time : "Not loaded" }));
+  [["investorgain", health.ig],["ipowatch", health.iw]].forEach(([n,ok]) => {
+    const s = document.createElement("span"); s.className = "chip " + (ok===true?"ok":ok===false?"bad":""); s.textContent = n + (ok===true?" up":ok===false?" down":" ..."); wrap.appendChild(s);
+  });
+  wrap.appendChild(btn);
+}
 function render(items) {
   const pans = Math.max(1, parseInt(document.getElementById("pans").value,10) || 4);
   const budget = parseFloat(document.getElementById("budget").value) || 28000;
   const subX = parseFloat(document.getElementById("subX").value) || 40;
   items.forEach(it => score(it, budget, subX, pans));
-  const picked = pickSlots(items);
-  const slot1 = picked.slot1, slot2 = picked.slot2;
+  const picked = pickSlots(items); const slot1 = picked.slot1, slot2 = picked.slot2;
   const visible = items.filter(x => x.status !== "closed").sort((a,b) => {
-    const rank = { APPLY:0, WATCH:1, SKIP:2 };
-    const d = rank[a.verdict]-rank[b.verdict];
-    if (d) return d;
-    if ((a.slot||9) !== (b.slot||9)) return (a.slot||9)-(b.slot||9);
-    return (b.ev||0)-(a.ev||0);
+    const rank = {APPLY:0,WATCH:1,SKIP:2}; const d = rank[a.verdict]-rank[b.verdict];
+    if (d) return d; if ((a.slot||9)!==(b.slot||9)) return (a.slot||9)-(b.slot||9); return (b.ev||0)-(a.ev||0);
   });
-  const t1 = slot1 && slot1.ticket, t2 = slot2 && slot2.ticket;
-  const used = (t1||0)+(t2||0);
-  document.getElementById("stamp").textContent = "Live " + (meta.time || new Date().toLocaleString("en-IN"));
-  document.getElementById("plan").innerHTML =
-    "<h2>Two-slot listing flip · sell on listing day</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>" +
-    (slot1 ? slot1.name : "HOLD CASH") + "</strong><p>" +
-    (slot1 ? (fmtISO(slot1.open) + "–" + fmtISO(slot1.close) + " · block " + inr(t1) + " · flip EV " + inr(slot1.ev)) : "No eligible flip.") +
-    "</p></div><div class=\"slotbox\"><h3>Slot 2</h3><strong>" +
-    (slot2 ? slot2.name : "HOLD CASH") + "</strong><p>" +
-    (slot2 ? (fmtISO(slot2.open) + "–" + fmtISO(slot2.close) + " · block " + inr(t2) + " · flip EV " + inr(slot2.ev)) : "Second slot empty.") +
+  const used = (slot1 && slot1.ticket || 0) + (slot2 && slot2.ticket || 0);
+  document.getElementById("plan").innerHTML = "<h2>Two-slot listing flip · multi-source GMP</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>" +
+    (slot1?slot1.name:"HOLD CASH") + "</strong><p>" + (slot1?(fmtISO(slot1.open)+"–"+fmtISO(slot1.close)+" · EV "+inr(slot1.ev)+" · "+slot1.srcLabel):"No eligible flip.") +
+    "</p></div><div class=\"slotbox\"><h3>Slot 2</h3><strong>" + (slot2?slot2.name:"HOLD CASH") + "</strong><p>" +
+    (slot2?(fmtISO(slot2.open)+"–"+fmtISO(slot2.close)+" · EV "+inr(slot2.ev)+" · "+slot2.srcLabel):"Second slot empty.") +
     "</p></div></div><p class=\"why\" style=\"margin-top:10px\">" +
-    (slot1 && slot2 ? ("Apply both on all " + pans + " PANs. Blocked ≈ " + inr(used) + " / account. Combined flip EV ≈ " + inr((slot1.ev||0)+(slot2.ev||0)) + ". Sell allotted stock on listing.") : "No clean flip pair yet.") + "</p>";
+    (slot1&&slot2?("Apply both on all "+pans+" PANs. Blocked ≈ "+inr(used)+" / account. Sell on listing."):"Need a clean pair from live desks.") + "</p>";
   document.getElementById("list").innerHTML = visible.map(it =>
-    "<article class=\"card\"><div class=\"row1\"><div><div class=\"name\">" + it.name +
-    "</div><div class=\"subn\">" + (it.slot ? "SLOT " + it.slot + " · " : "") + it.cat + " · " + it.status +
-    " · " + fmtISO(it.open) + "–" + fmtISO(it.close) + (it.listing ? " · lists " + fmtISO(it.listing) : "") +
-    "</div></div><span class=\"verdict v-" + it.verdict + "\">" +
-    (it.slot ? "SLOT " + it.slot + " · " : "") + it.verdict + "</span></div><div class=\"stats\">" +
-    "<div class=\"stat\"><b>" + (it.price ? "₹"+it.price : "TBA") + "</b><span>Cap price</span></div>" +
-    "<div class=\"stat\"><b>" + (it.gmp != null ? "₹"+it.gmp+" · "+it.pct.toFixed(0)+"%" : "—") + "</b><span>Raw GMP</span></div>" +
-    "<div class=\"stat\"><b>" + (it.expPct != null ? it.expPct.toFixed(0)+"%" : "—") + "</b><span>Haircut listing</span></div>" +
-    "<div class=\"stat\"><b>" + (it.ev != null && it.ev>=0 ? inr(it.ev) : "—") + "</b><span>4-PAN flip EV</span></div>" +
-    "<div class=\"stat\"><b>" + (it.ticket ? inr(it.ticket) : "—") + "</b><span>Blocked / acct</span></div></div><p class=\"why\">" +
-    it.why + "</p></article>"
+    "<article class=\"card\"><div class=\"row1\"><div><div class=\"name\">"+it.name+"</div><div class=\"subn\">"+(it.slot?"SLOT "+it.slot+" · ":"")+(it.cat||"")+" · "+(it.status||"")+" · "+it.srcLabel+" · GMP "+(it.gmps||[]).map(g=>"Rs "+g).join(" / ")+"</div></div><span class=\"verdict v-"+it.verdict+"\">"+(it.slot?"SLOT "+it.slot+" · ":"")+it.verdict+"</span></div><div class=\"stats\"><div class=\"stat\"><b>"+(it.price?"Rs "+it.price:"TBA")+"</b><span>Cap price</span></div><div class=\"stat\"><b>"+(it.gmp!=null?("Rs "+Math.round(it.gmp)+" · "+it.pct.toFixed(0)+"%"):"-")+"</b><span>Median GMP</span></div><div class=\"stat\"><b>"+(it.expPct!=null?it.expPct.toFixed(0)+"%":"-")+"</b><span>Haircut listing</span></div><div class=\"stat\"><b>"+(it.ev!=null&&it.ev>=0?inr(it.ev):"-")+"</b><span>4-PAN flip EV</span></div><div class=\"stat\"><b>"+(it.ticket?inr(it.ticket):"-")+"</b><span>Blocked / acct</span></div></div><p class=\"why\">"+it.why+"</p></article>"
   ).join("");
 }
-async function load() {
-  const btn = document.getElementById("btn");
-  const err = document.getElementById("err");
-  btn.disabled = true; btn.textContent = "Fetching…";
-  err.hidden = true;
-  try {
-    const res = await fetch(FEED + Date.now(), { cache: "no-store" });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    const rows = data.reportTableData || [];
-    if (!rows.length) throw new Error("Empty table");
-    cache = rows.map(parseRow);
-    meta = { time: data.currentTime || new Date().toLocaleString("en-IN") };
-    render(cache);
-  } catch (e) {
-    err.hidden = false;
-    err.textContent = "Live fetch failed (" + e.message + "). Need internet.";
-    if (cache.length) render(cache);
-  } finally {
-    btn.disabled = false; btn.textContent = "Refresh live data";
-  }
+async function fetchText(url) { const res = await fetch(url, { cache:"no-store" }); if (!res.ok) throw new Error("HTTP "+res.status); return res.text(); }
+async function fetchJSON(url) { const res = await fetch(url, { cache:"no-store" }); if (!res.ok) throw new Error("HTTP "+res.status); return res.json(); }
+async function fetchIpoWatch() {
+  try { return parseIpoWatch(await fetchText(IW + "?t=" + Date.now())); } catch(e) {}
+  for (const wrap of PROXIES) { try { return parseIpoWatch(await fetchText(wrap(IW))); } catch(e) {} }
+  throw new Error("ipowatch blocked");
 }
-["pans","budget","subX"].forEach(id => {
-  document.getElementById(id).addEventListener("input", () => { if (cache.length) render(cache); });
-});
+async function load() {
+  const btn = document.getElementById("btn"); const err = document.getElementById("err");
+  btn.disabled = true; btn.textContent = "Fetching sources..."; err.hidden = true;
+  health = { time: new Date().toLocaleString("en-IN") }; setChips();
+  let ig = [], iw = [];
+  await Promise.allSettled([
+    fetchJSON(IG + Date.now()).then(d => { ig = parseInvestorGain(d); health.ig = ig.length>0; health.igTime = d.currentTime; }).catch(() => { health.ig = false; }),
+    fetchIpoWatch().then(rows => { iw = rows; health.iw = rows.length>0; }).catch(() => { health.iw = false; })
+  ]);
+  setChips();
+  cache = merge(ig, iw);
+  if (!cache.length) { err.hidden = false; err.textContent = "Every source failed."; }
+  else { render(cache); document.getElementById("stamp").textContent = "Merged " + (health.igTime || health.time) + " · " + cache.length + " names"; }
+  btn.disabled = false; btn.textContent = "Refresh all sources";
+}
+["pans","budget","subX"].forEach(id => document.getElementById(id).addEventListener("input", () => { if (cache.length) render(cache); }));
 load();
 </script>
 </body>
