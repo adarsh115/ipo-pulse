@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>IPO Pulse — multi-source listing flip</title>
+<style>
+  :root { --ink:#16181E; --muted:#6A6F7A; --line:#D7D4CB; --paper:#E8E6DE; --card:#FFFffb;
+    --apply:#1B7A4A; --apply-bg:#E3F4EA; --watch:#8A5A12; --watch-bg:#F6EBD8; --skip:#9A3B32; --skip-bg:#F8E6E3; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--paper); color:var(--ink); font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:22px 16px 64px; }
+  .hero { background:var(--ink); color:#F4F3EE; border-radius:16px; padding:22px 24px 18px; }
+  .hero h1 { font-family:Georgia,serif; margin:0 0 6px; font-size:28px; }
+  .hero p { margin:0; color:#C9C6BB; font-size:14px; line-height:1.45; max-width:800px; }
+  .meta { display:flex; flex-wrap:wrap; gap:8px; margin-top:14px; align-items:center; }
+  .chip { background:#2A2D36; color:#EDEBE2; font-size:12px; padding:4px 10px; border-radius:999px; }
+  .chip.ok { background:#1F3D2C; color:#B6E3C6; }
+  .chip.bad { background:#3D2220; color:#F0B8B3; }
+  .refresh { border:0; background:#F4F3EE; color:var(--ink); font-weight:700; font-size:13px; padding:7px 14px; border-radius:999px; cursor:pointer; }
+  .controls { display:flex; flex-wrap:wrap; gap:10px; align-items:end; margin:16px 0 8px; }
+  .field { display:flex; flex-direction:column; gap:4px; font-size:12px; color:var(--muted); font-weight:600; }
+  .field input { font:inherit; color:var(--ink); padding:8px 10px; border:1px solid var(--line); border-radius:8px; background:#fff; width:110px; }
+  .err { background:#F8E6E3; color:var(--skip); border-radius:10px; padding:10px 14px; margin:10px 0; font-size:13px; }
+  .plan { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px 18px; margin:12px 0 18px; }
+  .plan h2 { margin:0 0 8px; font-size:15px; }
+  .slots { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .slotbox { background:#F6F5F0; border-radius:10px; padding:12px 14px; }
+  .slotbox h3 { margin:0 0 4px; font-size:11px; color:var(--muted); letter-spacing:.04em; text-transform:uppercase; }
+  .slotbox strong { display:block; font-size:16px; margin-bottom:4px; }
+  .slotbox p { margin:0; font-size:13px; line-height:1.45; }
+  .grid { display:grid; gap:10px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px 16px; }
+  .row1 { display:flex; justify-content:space-between; gap:10px; }
+  .name { font-weight:750; font-size:16px; }
+  .subn { color:var(--muted); font-size:12.5px; margin-top:2px; }
+  .verdict { flex-shrink:0; font-size:11px; font-weight:800; letter-spacing:.04em; padding:5px 9px; border-radius:999px; text-transform:uppercase; }
+  .v-APPLY { background:var(--apply-bg); color:var(--apply); }
+  .v-WATCH { background:var(--watch-bg); color:var(--watch); }
+  .v-SKIP { background:var(--skip-bg); color:var(--skip); }
+  .stats { display:grid; grid-template-columns:repeat(5,1fr); gap:8px; margin:10px 0 6px; }
+  .stat { background:#F6F5F0; border-radius:9px; padding:8px 9px; }
+  .stat b { display:block; font-variant-numeric:tabular-nums; font-size:13.5px; }
+  .stat span { font-size:11px; color:var(--muted); }
+  .why { font-size:13.5px; line-height:1.45; margin:6px 0 0; }
+  .note { font-size:12px; color:var(--muted); margin-top:14px; line-height:1.5; }
+  @media (max-width:800px){ .slots,.stats { grid-template-columns:1fr 1fr; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="hero">
+    <h1>IPO Pulse</h1>
+    <p>Listing-day flip. Live InvestorGain JSON + IPOWatch snapshot hosted on this repo (GitHub raw allows CORS; the IPOWatch website itself does not). Median GMP when both answer.</p>
+    <div class="meta" id="srcchips">
+      <span class="chip" id="stamp">Not loaded</span>
+      <button class="refresh" id="btn" onclick="load()">Refresh all sources</button>
+    </div>
+  </header>
+  <div class="controls">
+    <label class="field">PANs <input id="pans" type="number" min="1" value="4" /></label>
+    <label class="field">Rs / account <input id="budget" type="number" min="14000" step="500" value="28000" /></label>
+    <label class="field">Assume retail x <input id="subX" type="number" min="1" value="40" /></label>
+  </div>
+  <div id="err" hidden class="err"></div>
+  <div class="plan" id="plan">Loading sources...</div>
+  <div class="grid" id="list"></div>
+  <p class="note">IPOWatch.com blocks browser reads (no CORS header). Pulse therefore reads feeds/ipowatch.json from this GitHub repo. InvestorGain is live. Rentomojo already shows why two desks matte[...]
+</div>
+<script>
+const GMP_HAIRCUT = 0.75;
+const IG = "https://webnodejs.investorgain.com/cloud/v2/report/data-read/331/1/9/2026/2026-27/0/all?search=&v=";
+const IW_JSON = "https://raw.githubusercontent.com/adarsh115/ipo-pulse/main/feeds/ipowatch.json";
+function strip(html) {
+  if (html == null) return "";
+  const d = document.createElement("div"); d.innerHTML = String(html);
+  return (d.textContent || "").replace(/\s+/g, " ").trim();
+}
+function num(s) {
+  if (s == null || s === "" || s === "-" || s === "--") return null;
+  const m = String(s).replace(/,/g, "").match(/-?\d+(?:\.\d+)?/);
+  return m ? parseFloat(m[0]) : null;
+}
+function keyName(s) {
+  return String(s || "").toLowerCase().replace(/\b(limited|ltd|ipo|sme|mainboard|india)\b/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+}
+function inr(n) {
+  if (n == null || Number.isNaN(n)) return "-";
+  return "Rs " + Math.round(n).toLocaleString("en-IN");
+}
+function fmtISO(iso) {
+  if (!iso) return "-";
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return iso;
+  const [y,m,d] = iso.split("-").map(Number);
+  return new Date(y, m-1, d).toLocaleDateString("en-IN", { day:"numeric", month:"short" });
+}
+function median(arr) {
+  const a = arr.filter(x => x != null && !Number.isNaN(x)).sort((x,y)=>x-y);
+  if (!a.length) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : (a[mid-1] + a[mid]) / 2;
+}
+function parseGmpCell(raw) {
+  const t = strip(raw);
+  const rupee = t.match(/(-?\d+(?:\.\d+)?)/);
+  const pct = t.match(/\((-?\d+(?:\.\d+)?)%\)/);
+  return { gmp: rupee ? parseFloat(rupee[1]) : 0, pct: pct ? parseFloat(pct[1]) : null };
+}
+function parseInvestorGain(data) {
+  return ((data && data.reportTableData) || []).map(row => {
+    const name = row["~ipo_name"] || strip(row.Name);
+    const g = parseGmpCell(row.GMP);
+    const price = num(row["Price (\u20b9)"]);
+    const lot = num(row.Lot);
+    const cat = (row["~IPO_Category"] || "").toUpperCase().includes("SME") ? "sme" : "mainboard";
+    const flag = row["~ipo_status1"] || "";
+    let status = "upcoming";
+    if (flag === "O") status = "open";
+    if (flag === "C" || flag === "LN" || flag === "LP") status = "closed";
+    return { key: keyName(name), name, cat, status, open: row["~Srt_Open"] || null, close: row["~Srt_Close"] || null, listing: row["~Str_Listing"] || null, price, lot, size: strip(row["IPO Size"]), su[...]
+  });
+}
+function parseWatchJson(d) {
+  return (d.rows || []).map(r => {
+    const price = num(r.band);
+    const st = String(r.status || "").toLowerCase();
+    let status = "upcoming";
+    if (st.includes("open")) status = "open";
+    if (st.includes("close") || st.includes("listed")) status = "closed";
+    return { key: keyName(r.name), name: r.name, cat: /sme/i.test(r.name) ? "sme" : "mainboard", status, price, lot: null, size: "", sub: null, gmpIW: r.gmp, pctIW: price && r.gmp != null ? (r.gmp/pri[...]
+  });
+}
+function merge(igRows, iwRows) {
+  const map = new Map();
+  function add(row, src) {
+    const cur = map.get(row.key) || { key: row.key, name: row.name, sources: [], gmps: [], pcts: [] };
+    if (row.name && row.name.length > (cur.name||"").length) cur.name = row.name;
+    if (row.cat) cur.cat = cur.cat || row.cat;
+    if (row.status === "open") cur.status = "open";
+    else if (!cur.status) cur.status = row.status;
+    if (row.status === "closed") cur.status = "closed";
+    cur.open = cur.open || row.open; cur.close = cur.close || row.close; cur.listing = cur.listing || row.listing;
+    cur.price = cur.price || row.price; cur.lot = cur.lot || row.lot; cur.size = cur.size || row.size; cur.sub = cur.sub || row.sub;
+    if (!cur.sources.includes(src)) cur.sources.push(src);
+    if (src === "investorgain" && row.gmpIG != null) { cur.gmps.push(row.gmpIG); if (row.pctIG != null) cur.pcts.push(row.pctIG); }
+    if (src === "ipowatch" && row.gmpIW != null) { cur.gmps.push(row.gmpIW); if (row.pctIW != null) cur.pcts.push(row.pctIW); }
+    map.set(row.key, cur);
+  }
+  igRows.forEach(r => add(r, "investorgain"));
+  iwRows.forEach(r => add(r, "ipowatch"));
+  return [...map.values()].map(it => {
+    it.gmp = median(it.gmps) || 0;
+    it.pct = median(it.pcts) || (it.price && it.gmp ? (it.gmp/it.price)*100 : 0);
+    it.ticket = (it.price && it.lot) ? it.price * it.lot : null;
+    it.srcLabel = it.sources.join(" + ");
+    it.agree = it.gmps.length >= 2 && Math.abs((it.gmps[0]||0)-(it.gmps[1]||0)) <= Math.max(8, 0.15*Math.max(...it.gmps.map(Math.abs),1));
+    return it;
+  });
+}
+function score(it, budget, subX, pans) {
+  if (it.status === "closed") { it.verdict = "SKIP"; it.why = "Closed."; it.ev = -1; return it; }
+  if (it.cat === "sme") { it.verdict = "SKIP"; it.why = "SME is a bad listing-day flip."; it.ev = -1; return it; }
+  if (!it.price || !it.lot) { it.verdict = "WATCH"; it.why = "Band/lot missing."; it.ev = 0; return it; }
+  if (it.ticket > budget/2 + 2500) { it.verdict = "SKIP"; it.why = "Ticket too big."; it.ev = -1; return it; }
+  const usedSub = it.sub && it.sub > 1 ? it.sub : (subX || Math.max(8, 10 + it.pct * 1.2));
+  const pFam = 1 - Math.pow(1 - (usedSub<=1?1:1/usedSub), pans);
+  it.expPct = it.pct * GMP_HAIRCUT;
+  it.ev = pFam * Math.max(0, it.gmp) * GMP_HAIRCUT * it.lot;
+  if (it.gmp <= 0 || it.expPct < 8) { it.verdict = "SKIP"; it.why = "Median GMP after haircut too thin."; return it; }
+  if (it.expPct < 12) { it.verdict = "WATCH"; it.why = "Haircut listing ~" + it.expPct.toFixed(0) + "%."; return it; }
+  const conf = it.sources.length > 1 ? (it.agree ? "desks agree" : "desks differ — median") : "single desk";
+  it.verdict = "APPLY"; it.why = "Flip EV " + inr(it.ev) + " · " + conf + " · sell on listing.";
+  return it;
+}
+function pickSlots(items) {
+  const apply = items.filter(x => x.verdict === "APPLY").sort((a,b) => ((a.open||"9999").localeCompare(b.open||"9999")) || ((b.ev||0)-(a.ev||0)));
+  const byEv = items.filter(x => x.verdict === "APPLY").slice().sort((a,b)=>(b.ev||0)-(a.ev||0));
+  const slot1 = apply[0] || null;
+  const slot2 = byEv.find(x => slot1 && x.key !== slot1.key) || apply[1] || null;
+  items.forEach(x => x.slot = null);
+  if (slot1) slot1.slot = 1; if (slot2) slot2.slot = 2;
+  items.filter(x => x.verdict === "APPLY" && !x.slot).forEach(x => { x.verdict = "WATCH"; x.why = "Only two slots."; });
+  return { slot1, slot2 };
+}
+let cache = []; let health = {};
+function setChips() {
+  const wrap = document.getElementById("srcchips"); const btn = document.getElementById("btn");
+  wrap.innerHTML = "";
+  wrap.appendChild(Object.assign(document.createElement("span"), { className:"chip", id:"stamp", textContent: health.time ? "Merged " + health.time : "Not loaded" }));
+  [["investorgain", health.ig],["ipowatch feed", health.iw]].forEach(([n,ok]) => {
+    const s = document.createElement("span"); s.className = "chip " + (ok===true?"ok":ok===false?"bad":"");
+    s.textContent = n + (ok===true?" up":ok===false?" down":" ..."); wrap.appendChild(s);
+  });
+  wrap.appendChild(btn);
+}
+function render(items) {
+  const pans = Math.max(1, parseInt(document.getElementById("pans").value,10) || 4);
+  const budget = parseFloat(document.getElementById("budget").value) || 28000;
+  const subX = parseFloat(document.getElementById("subX").value) || 40;
+  items.forEach(it => score(it, budget, subX, pans));
+  const picked = pickSlots(items); const slot1 = picked.slot1, slot2 = picked.slot2;
+  const visible = items.filter(x => x.status !== "closed").sort((a,b) => {
+    const rank = {APPLY:0,WATCH:1,SKIP:2}; const d = rank[a.verdict]-rank[b.verdict];
+    if (d) return d; if ((a.slot||9)!==(b.slot||9)) return (a.slot||9)-(b.slot||9); return (b.ev||0)-(a.ev||0);
+  });
+  const used = (slot1 && slot1.ticket || 0) + (slot2 && slot2.ticket || 0);
+  document.getElementById("plan").innerHTML = "<h2>Two-slot listing flip</h2><div class=\"slots\"><div class=\"slotbox\"><h3>Slot 1</h3><strong>"+(slot1?slot1.name:"HOLD CASH")+"</strong><p>"+(slot1?([...]
+  document.getElementById("list").innerHTML = visible.map(it =>
+    "<article class=\"card\"><div class=\"row1\"><div><div class=\"name\">"+it.name+"</div><div class=\"subn\">"+(it.slot?"SLOT "+it.slot+" · ":"")+(it.cat||"")+" · "+(it.status||"")+" · "+it.srcLa[...]
+  ).join("");
+}
+async function fetchJSON(url) {
+  const res = await fetch(url, { cache:"no-store" });
+  if (!res.ok) throw new Error("HTTP "+res.status);
+  return res.json();
+}
+async function load() {
+  const btn = document.getElementById("btn"); const err = document.getElementById("err");
+  btn.disabled = true; btn.textContent = "Fetching..."; err.hidden = true;
+  health = { time: new Date().toLocaleString("en-IN") }; setChips();
+  let ig = [], iw = [];
+  await Promise.allSettled([
+    fetchJSON(IG + Date.now()).then(d => { ig = parseInvestorGain(d); health.ig = ig.length>0; health.igTime = d.currentTime; }).catch(() => { health.ig = false; }),
+    fetchJSON(IW_JSON + "?t=" + Date.now()).then(d => { iw = parseWatchJson(d); health.iw = iw.length>0; health.iwTime = d.updated; }).catch(() => { health.iw = false; })
+  ]);
+  setChips();
+  cache = merge(ig, iw);
+  if (!cache.length) { err.hidden = false; err.textContent = "Every source failed."; }
+  else {
+    render(cache);
+    document.getElementById("stamp").textContent = "Merged " + (health.igTime || health.time) + (health.iwTime ? " · IW " + health.iwTime : "");
+  }
+  btn.disabled = false; btn.textContent = "Refresh all sources";
+}
+["pans","budget","subX"].forEach(id => document.getElementById(id).addEventListener("input", () => { if (cache.length) render(cache); }));
+load();
+</script>
+</body>
+</html>
